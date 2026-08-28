@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The README asks for `#![deny(warnings)]` in CI. Setting it here keeps the
+  # attribute out of the source, where it would break local iteration on any
+  # new compiler warning.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # No secrets are provided, which is the point: the suite must be fully
+      # offline. A test that needs a relay or Slack belongs behind `relay-e2e`.
+      - run: cargo test --workspace
+
+  # The secret gate the README requires before anything goes public. It repeats
+  # fmt/clippy/test on purpose: it is meant to be the single command a human
+  # runs before pushing, so it cannot depend on the job above having run.
+  ship-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the history scan needs the history
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ship-check.sh
+
+  release-size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p sideband
+      - name: Check the binary stays under 25 MB
+        run: |
+          size=$(stat -c%s target/release/sideband)
+          echo "sideband is $((size / 1024 / 1024)) MiB"
+          test "$size" -lt 26214400

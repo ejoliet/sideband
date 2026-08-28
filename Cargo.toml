@@ -1,0 +1,25 @@
+[workspace]
+members = ["crates/sideband-core", "crates/sideband"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ejoliet/sideband"
+rust-version = "1.91"
+
+# The README budgets under 25 MB for the shipped binary. iroh and its QUIC
+# stack are large, so the release profile strips and drops unwinding tables.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time"] }
+tracing = "0.1"

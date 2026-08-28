@@ -1,0 +1,124 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # No artifact is built until the secret gate passes: a release is the most
+  # public thing this repository does.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # ship-check scans the whole history
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ship-check.sh
+
+  build:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          # Oldest supported glibc wins the widest set of Linux boxes.
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked -p sideband --target ${{ matrix.target }}
+      - name: Check the binary stays under 25 MB
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/sideband
+          size=$(wc -c < "$bin")
+          echo "sideband is $((size / 1024 / 1024)) MiB"
+          test "$size" -lt 26214400
+      - name: Smoke-test the artifact
+        run: |
+          target/${{ matrix.target }}/release/sideband --version
+          target/${{ matrix.target }}/release/sideband send --help
+      - name: Package
+        shell: bash
+        run: |
+          tar -czf sideband-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release sideband
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sideband-${{ matrix.target }}
+          path: sideband-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Job level, not step level: a step's own `env` is not visible to its `if`.
+    env:
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+      MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz | tee SHA256SUMS
+      # Apple Developer ID signing and notarization need credentials this
+      # project does not have yet. Build provenance is the signature that is
+      # actually verifiable today: `gh attestation verify <file> -R ejoliet/sideband`.
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: artifacts/*.tar.gz
+      - name: Sign the checksums with minisign
+        # Optional: only runs once a signing key exists in repository secrets.
+        if: ${{ env.MINISIGN_SECRET_KEY != '' }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y minisign
+          printf '%s' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          echo "$MINISIGN_PASSWORD" | minisign -Sm artifacts/SHA256SUMS -s /tmp/minisign.key
+          shred -u /tmp/minisign.key
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+            artifacts/SHA256SUMS.minisig
+          fail_on_unmatched_files: false
+          generate_release_notes: true
+          body: |
+            Install with Homebrew:
+
+                brew install ejoliet/tap/sideband
+
+            or:
+
+                curl -fsSL https://raw.githubusercontent.com/ejoliet/sideband/main/scripts/install.sh | sh
+
+            Verify an artifact's provenance:
+
+                gh attestation verify sideband-<target>.tar.gz -R ejoliet/sideband

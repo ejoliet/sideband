@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+
+# Secrets. Tokens live in the environment; nothing token-shaped is ever committed.
+.env
+.env.*
+!.env.example
+
+.DS_Store
+.omc/
